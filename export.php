@@ -91,9 +91,18 @@ class quiz_export_engine
         ob_start();
         include __DIR__ . '/style/styles.css';
         $css = ob_get_clean();
+        $css .= "\n.que .info { width: 12em; }\n.que .content { margin: 0 0 0 13em; }\n";
         $pdf->WriteHTML($css, \Mpdf\HTMLParserMode::HEADER_CSS);
 
         $additionnal_informations = html_writer::tag('h3', get_string('documenttitle', 'quiz_export', $parameters_additionnal_informations), ['class' => 'text-center', 'style' => 'margin-bottom: -20px;']);
+
+        $sumgrades = $attemptobj->get_quiz()->sumgrades;
+        $percentages = [];
+        foreach ($attemptobj->get_slots() as $slot) {
+            $qa = $attemptobj->get_question_attempt($slot);
+            $maxmark = $qa->get_max_mark();
+            $percentages[$slot] = round(($maxmark / $sumgrades) * 100);
+        }
 
         switch ($pagemode) {
             default:
@@ -112,6 +121,7 @@ class quiz_export_engine
                 $contentHTML = ob_get_clean();
                 $contentHTML = preg_replace("/<input type=\"text\".+?value=\"/", ' - ', $contentHTML);
                 $contentHTML = preg_replace("/\" id=\"q.+?readonly\"(>| \/>)/", ' - ', $contentHTML);
+                $contentHTML = $this->add_question_percentages($contentHTML, $percentages);
 
                 $pdf->WriteHTML($this->preloadImageWithCurrentSession($additionnal_informations), \Mpdf\HTMLParserMode::HTML_BODY);
                 $pdf->WriteHTML($this->preloadImageWithCurrentSession($contentHTML), \Mpdf\HTMLParserMode::DEFAULT_MODE);
@@ -124,6 +134,7 @@ class quiz_export_engine
                 ob_start();
                 include $CFG->dirroot . '/mod/quiz/report/export/style/styles.css';
                 $css = ob_get_clean();
+                $css .= "\n.que .info { width: 12em; }\n.que .content { margin: 0 0 0 13em; }\n";
                 $pdf->WriteHTML($css, \Mpdf\HTMLParserMode::HEADER_CSS);
 
                 // Start output buffering html
@@ -132,6 +143,7 @@ class quiz_export_engine
                 $contentHTML = ob_get_clean();
                 $contentHTML = preg_replace("/<input type=\"text\".+?value=\"/", ' - ', $contentHTML);
                 $contentHTML = preg_replace("/\" id=\"q.+?readonly\"(>| \/>)/", ' - ', $contentHTML);
+                $contentHTML = $this->add_question_percentages($contentHTML, $percentages);
                 if ($current_page == 0) {
                     $pdf->WriteHTML($this->preloadImageWithCurrentSession($additionnal_informations), \Mpdf\HTMLParserMode::HTML_BODY);
                 }
@@ -155,11 +167,29 @@ class quiz_export_engine
     }
 
     /**
+     * Add question percentages to the HTML.
+     *
+     * @param string $html The HTML content.
+     * @param array $percentages Array of percentages keyed by slot/question number.
+     * @return string Modified HTML.
+     */
+    protected function add_question_percentages(string $html, array $percentages)
+    {
+        return preg_replace_callback('#<h3 class="no">Question <span class="qno">(\d+)</span></h3>#', function($matches) use ($percentages) {
+            $num = (int)$matches[1];
+            $perc = $percentages[$num] ?? 0;
+            return '<h3 class="no">Question <span class="qno">' . $num . '</span> (' . $perc . '%)</h3>';
+        }, $html);
+    }
+
+    /**
      * Generate the html of all quiz questions (with one question per page)
      * Used with "PAGEMODE_QUESTIONPERPAGE" page mode
      *
      * @param $attemptobj
      * @return array
+     * @throws coding_exception
+     * @throws moodle_exception
      */
     protected function question_per_page($attemptobj)
     {
@@ -198,6 +228,8 @@ class quiz_export_engine
      *
      * @param $attemptobj
      * @return array
+     * @throws coding_exception
+     * @throws moodle_exception
      */
     protected function questions_paged($attemptobj)
     {
@@ -230,6 +262,8 @@ class quiz_export_engine
      *
      * @param $attemptobj
      * @return string[]
+     * @throws coding_exception
+     * @throws moodle_exception
      */
     protected function all_questions($attemptobj)
     {
