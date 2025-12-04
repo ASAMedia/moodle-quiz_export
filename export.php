@@ -110,6 +110,7 @@ class quiz_export_engine
                 ob_start();
                 include $html_files[0];
                 $contentHTML = ob_get_clean();
+                $contentHTML = $this->sanitize_svg_for_mpdf($contentHTML);
                 $contentHTML = preg_replace("/<input type=\"text\".+?value=\"/", ' - ', $contentHTML);
                 $contentHTML = preg_replace("/\" id=\"q.+?readonly\"(>| \/>)/", ' - ', $contentHTML);
 
@@ -130,6 +131,7 @@ class quiz_export_engine
                 ob_start();
                 include $html_file;
                 $contentHTML = ob_get_clean();
+                $contentHTML = $this->sanitize_svg_for_mpdf($contentHTML);
 //                $contentHTML = preg_replace("/<input.*>/U", '', $contentHTML);
                 $contentHTML = preg_replace("/<input type=\"text\".+?value=\"/", ' - ', $contentHTML);
                 $contentHTML = preg_replace("/\" id=\"q.+?readonly\"(>| \/>)/", ' - ', $contentHTML);
@@ -524,6 +526,26 @@ class quiz_export_engine
             }
             $html = str_replace($matches[1], $matches_content, $html);
         }
+        return $html;
+    }
+
+    /**
+     * Remove/normalize problematic SVG attributes so mPDF won't error.
+     */
+    protected function sanitize_svg_for_mpdf(string $html): string
+    {
+        // stroke-dasharray="null" -> "none"
+        $html = preg_replace('/stroke-dasharray\s*=\s*"null"/i', 'stroke-dasharray="none"', $html);
+
+        // Remove invalid opacity attributes with value "null"
+        $html = preg_replace('/\s(?:fill|stroke)-opacity\s*=\s*"null"/i', '', $html);
+
+        // Remove invalid paint attributes with value "null"
+        $html = preg_replace('/\s(?:fill|stroke)\s*=\s*"null"/i', '', $html);
+
+        // Drop empty embedded images which can confuse parsers
+        $html = preg_replace('/<image\b[^>]*xlink:href\s*=\s*""[^>]*>\s*<\/image>/i', '', $html);
+
         return $html;
     }
 }
