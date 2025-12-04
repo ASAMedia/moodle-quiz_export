@@ -547,15 +547,170 @@ class quiz_export_engine
         $html = preg_replace('/<image\b[^>]*xlink:href\s*=\s*""[^>]*>\s*<\/image>/i', '', $html);
 
         // Normalize angle-bracket glyphs to safe entities so XML stays valid
-        // Left angle variants -> &lt;
         $html = preg_replace('/[\x{2329}\x{3008}\x{2039}]/u', '&lt;', $html);
-        // Right angle variants -> &gt;
         $html = preg_replace('/[\x{232A}\x{3009}\x{203A}]/u', '&gt;', $html);
 
         // Ensure SVG text uses a font with full glyph coverage
-        // Replace common SVG font-family attributes pointing to Helvetica/Arial
         $html = preg_replace('/font-family\s*=\s*"[^"]*(Helvetica|Arial)[^"]*"/i', 'font-family="DejaVu Sans"', $html);
 
+        // Fix multiline SVG text: convert <tspan dy="..."> lines into separate <text> nodes
+        $html = $this->expand_svg_tspan_lines($html);
+
         return $html;
+    }
+
+    /**
+     * Expand <text><tspan dy="...">...</tspan></text> into multiple <text> nodes
+     * with explicit y positions (mPDF handles these reliably).
+     */
+    protected function expand_svg_tspan_lines(string $html): string
+    {
+        return preg_replace_callback('/<svg\b[^>]*>.*?<\/svg>/is', function ($m) {
+            $svg = $m[0];
+            $new = $this->rewrite_svg_tspans_to_text($svg);
+            return $new ?? $svg;
+        }, $html);
+    }
+
+    protected function rewrite_svg_tspans_to_text(string $svg): ?string
+    {
+        libxml_use_internal_errors(true);
+        $dom = new \DOMDocument('1.0', 'UTF-8');
+
+        // Load as XML (SVG is XML). If it fails, keep original.
+        if (!$dom->loadXML($svg)) {
+            libxml_clear_errors();
+            return null;
+        }
+
+        $xp = new \DOMXPath($dom);
+        $xp->registerNamespace('svg', 'http://www.w3.org/2000/svg');
+
+        foreach ($xp->query('//svg:text[svg:tspan]') as $textEl) {
+            /** @var \DOMElement $textEl */
+            $tspans = [];
+            foreach (iterator_to_array($textEl->childNodes) as $child) {
+                if ($child instanceof \DOMElement && $child->tagName === 'tspan') {
+                    $tspans[] = $child;
+                }
+            }
+            if (!$tspans) {
+                continue;
+            }
+
+            $fontSize = $this->extract_svg_font_size($textEl) ?? 16.0;
+            $defaultInc = $fontSize * 1.1; // a bit more than 1em to avoid overlap
+
+            $baseX = $textEl->hasAttribute('x') ? (float)$textEl->getAttribute('x') : null;
+            $baseY = $textEl->hasAttribute('y') ? (float)$textEl->getAttribute('y') : null;
+
+            $currentY = $baseY ?? 0.0;
+            $first = true;
+            $after = $textEl;
+
+            foreach ($tspans as $tspan) {
+                $line = trim($tspan->textContent);
+                // Keep empty lines as spacing if dy present.
+                $hasDy = $tspan->hasAttribute('dy');
+                if ($first) {
+                    // First line: use explicit y from tspan if present, else base y.
+                    if ($tspan->hasAttribute('y')) {
+                        $currentY = (float)$tspan->getAttribute('y');
+                    }
+                    $first = false;
+                } else {
+                    $inc = $hasDy ? $this->parse_svg_length($tspan->getAttribute('dy'), $fontSize) : $defaultInc;
+                    if ($inc == 0.0) {
+                        $inc = $defaultInc;
+                    }
+                    $currentY += $inc;
+                }
+
+                // If it's a pure spacer (empty), still add an empty line node to preserve spacing.
+                $x = $tspan->hasAttribute('x') ? (float)$tspan->getAttribute('x') : ($baseX ?? 0.0);
+
+                $newText = $textEl->cloneNode(false); // copy attributes like transform, font, etc.
+                // Avoid duplicate IDs
+                if ($newText->hasAttribute('id')) {
+                    $newText->removeAttribute('id');
+                }
+                // Set coordinates explicitly per line
+                $newText->setAttribute('x', (string)$x);
+                $newText->setAttribute('y', (string)$currentY);
+
+                // Clear children and set text
+                while ($newText->firstChild) {
+                    $newText->removeChild($newText->firstChild);
+                }
+                $newText->appendChild($dom->createTextNode($line));
+
+                // Insert after previous
+                if ($after->nextSibling) {
+                    $after->parentNode->insertBefore($newText, $after->nextSibling);
+                } else {
+                    $after->parentNode->appendChild($newText);
+                }
+                $after = $newText;
+            }
+
+            // Remove original multiline <text>
+            $textEl->parentNode->removeChild($textEl);
+        }
+
+        // Return the modified single <svg> element XML
+        return $dom->saveXML($dom->documentElement);
+    }
+
+    protected function extract_svg_font_size(\DOMElement $el): ?float
+    {
+        // font-size attribute
+        if ($el->hasAttribute('font-size')) {
+            return $this->parse_svg_length($el->getAttribute('font-size'), 16.0, true);
+        }
+        // font-size in style
+        if ($el->hasAttribute('style')) {
+            if (preg_match('/font-size\s*:\s*([0-9]*\.?[0-9]+)\s*(px|pt|em)?/i', $el->getAttribute('style'), $m)) {
+                return $this->parse_svg_length($m[1] . ($m[2] ?? ''), 16.0, true);
+            }
+        }
+        // Inherit from parent if possible
+        $p = $el->parentNode;
+        while ($p instanceof \DOMElement) {
+            if ($p->tagName === 'text' || $p->tagName === 'g' || $p->tagName === 'svg') {
+                if ($p->hasAttribute('font-size')) {
+                    return $this->parse_svg_length($p->getAttribute('font-size'), 16.0, true);
+                }
+                if ($p->hasAttribute('style')
+                    && preg_match('/font-size\s*:\s*([0-9]*\.?[0-9]+)\s*(px|pt|em)?/i', $p->getAttribute('style'), $m)) {
+                    return $this->parse_svg_length($m[1] . ($m[2] ?? ''), 16.0, true);
+                }
+            }
+            $p = $p->parentNode;
+        }
+        return null;
+    }
+
+    /**
+     * Parse a simple SVG length. Supports px, pt, em, or unitless.
+     * If $isFont is true, 'em' is relative to provided $fontSize; pt converted to px (96dpi).
+     */
+    protected function parse_svg_length(string $val, float $fontSize, bool $isFont = false): float
+    {
+        $val = trim($val);
+        if (preg_match('/^([+-]?[0-9]*\.?[0-9]+)\s*(em|px|pt)?$/i', $val, $m)) {
+            $num = (float)$m[1];
+            $unit = strtolower($m[2] ?? ($isFont ? 'px' : 'px'));
+            switch ($unit) {
+                case 'em':
+                    return $num * $fontSize;
+                case 'pt':
+                    return $num * (96.0 / 72.0); // pt -> px
+                case 'px':
+                default:
+                    return $num;
+            }
+        }
+        // Fallback
+        return $isFont ? $fontSize : ($fontSize * 1.1);
     }
 }
