@@ -546,6 +546,16 @@ class quiz_export_engine
         // Drop empty embedded images which can confuse parsers
         $html = preg_replace('/<image\b[^>]*xlink:href\s*=\s*""[^>]*>\s*<\/image>/i', '', $html);
 
+        // Normalize angle-bracket glyphs to safe entities so XML stays valid
+        // Left angle variants -> &lt;
+        $html = preg_replace('/[\x{2329}\x{3008}\x{2039}]/u', '&lt;', $html);
+        // Right angle variants -> &gt;
+        $html = preg_replace('/[\x{232A}\x{3009}\x{203A}]/u', '&gt;', $html);
+
+        // Ensure SVG text uses a font with full glyph coverage
+        // Replace common SVG font-family attributes pointing to Helvetica/Arial
+        $html = preg_replace('/font-family\s*=\s*"[^"]*(Helvetica|Arial)[^"]*"/i', 'font-family="DejaVu Sans"', $html);
+
         return $html;
     }
 }
